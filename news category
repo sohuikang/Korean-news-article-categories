@@ -1,0 +1,318 @@
+#패키지 준비하기
+import json
+import math
+import numpy as np
+import seaborn as sns
+from pandas import DataFrame
+from pandas import read_csv
+from pandas import read_table
+from konlpy.tag import Mecab
+from matplotlib import pyplot as plt
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Embedding, Dense, GRU, LSTM, SimpleRNN
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.utils import to_categorical
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix
+
+#데이터셋 준비하기
+df = read_csv('./news_title.csv', encoding='utf-8')
+df
+
+df['category'] = df['category'].replace({100: 0, 101: 1, 102: 2, 103: 3, 104: 4, 105: 5})
+df['category'].unique()
+
+swdf = read_table('http://itpaper.co.kr/data/korean_stopwords_100.txt', encoding='utf-8',
+ sep='\s+', names=['불용어', '품사', '비율'])
+
+stopwords = list(swdf['불용어'])
+print(stopwords)
+
+#데이터 전처리
+# 한글을 제외한 나머지 글자들을 빈 문자열로 대체
+df['news'] = df['news'].str.replace("[^ㄱ-ㅎㅏ-ㅣ가-힣 ]", "", regex=True)
+# news 컬럼의 데이터들 중에서 빈 문자열만 존재하는 항목은 결측치로 대체
+df['news'].replace('', np.nan, inplace=True)
+# 전체 데이터 셋 크기 확인
+print('데이터 크기: ', df['news'].shape)
+
+#결측치 확인
+df.isna().sum()
+
+#형태소 분석 및 불용어 제거하기
+
+# 형태소 분석 엔진
+mecab = Mecab()
+# 불용어를 제외한 문장내 형태소들을 저장할 리스트
+word_set = []
+# 덧글 내용에 대해 반복 처리
+for i, v in enumerate(df['news']):
+   # 덧글 하나에 대한 형태소 분석
+   morphs = mecab.morphs(v)
+  # 형태소 분석 결과 하나에 대해 불용어가 아닌 단어만 tmp_word에 모아 놓음
+   tmp_word = []
+  for j in morphs:
+    if j not in stopwords:
+    tmp_word.append(j)
+ 
+   # 불용어를 제외한 형태소 리스트를 통째로 word_set에 저장함
+   # -> word_set은 2차원 리스트가 된다. 1차원이 덧글 단위임
+  word_set.append(tmp_word)
+ 
+# 상위 3건만 출력해서 확인
+word_set[:3]
+
+
+#전체 단어에 대한 토큰화
+tokenizer = Tokenizer()
+tokenizer.fit_on_texts(word_set)
+print(f'전체 단어수: {len(tokenizer.word_index)}')
+
+#자주 등장하는 단어의 수 구하기
+# 사용 빈도가 높다고 판단할 등장 회수
+threshold = 3
+# 전체 단어의 수
+total_cnt = len(tokenizer.word_index)
+# 등장 빈도수가 threshold보다 작은 단어의 개수를 카운트할 값
+rare_cnt = 0
+# 훈련 데이터의 전체 단어 빈도수 총 합
+total_freq = 0
+# 등장 빈도수가 threshold보다 작은 단어의 등장 빈도수의 총 합
+rare_freq = 0
+# 단어와 빈도수의 쌍(pair)을 key와 value로 받는다.
+for key, value in tokenizer.word_counts.items():
+   total_freq = total_freq + value
+  # 단어의 등장 빈도수가 threshold보다 작으면
+  if(value < threshold):
+     rare_cnt = rare_cnt + 1
+     rare_freq = rare_freq + value
+ 
+print('단어 집합(vocabulary)의 크기 :',total_cnt)
+print('등장 빈도가 %s번 이하인 희귀 단어의 수: %s'%(threshold - 1, rare_cnt))
+print("단어 집합에서 희귀 단어의 비율:", (rare_cnt / total_cnt)*100)
+print("전체 등장 빈도에서 희귀 단어 등장 빈도 비율:", (rare_freq / total_freq)*100)
+
+# 자주 등장하는 단어 집합의 크기 구하기 -> 이 값이 첫 번째 학습층의 input 수가 된다.
+vocab_size = total_cnt - rare_cnt + 2
+print('단어 집합의 크기 :', vocab_size)
+
+#자주 등장하는 단어를 제외한 나머지 단어를 oov로 처리하여 최종 토큰화 진행
+tokenizer = Tokenizer(vocab_size, oov_token = 'OOV')
+tokenizer.fit_on_texts(word_set)
+token_set = tokenizer.texts_to_sequences(word_set)
+print('토큰의 크기 :', len(token_set))
+
+#생성된 토큰을 파일로 저장
+with open("word_index.json", "w", encoding='utf-8') as f:
+   f.write(json.dumps(tokenizer.word_index))
+   
+#토큰화 결과의 길이가 0인 항목 찾기
+drop_target_index = []
+for i, v in enumerate(token_set):
+    if len(v) < 1:
+       drop_target_index.append(i)
+ 
+print("길이가 0인 항목의 수: ", len(drop_target_index))
+
+#토큰화 결과의 길이가 0인 항목 삭제하기
+fill_token_set = np.delete(token_set, drop_target_index, axis=0)
+# 종속변수에서도 같은 위치의 항목들을 삭제해야 한다.
+label_set = np.delete(df['category'].values, drop_target_index, axis=0)
+print("독립변수(덧글) 데이터 수: ", len(fill_token_set))
+print("종속변수(레이블) 데이터 수: ", len(label_set))
+
+#각 문장별로 몇 개의 단어를 포함하고 있는지 측정
+word_counts = []
+for s in fill_token_set:
+   word_counts.append(len(s))
+print(word_counts)
+
+#기사 중 가장 많은 단어를 사용한 리뷰와 가장 적은 단어를 사용한 리뷰의 단어 수
+max_word_count = max(word_counts)
+min_word_count = min(word_counts)
+print('기사 제목의 최대 단어수 :',max_word_count)
+print('기사 제목의 최소 단어수 :',min_word_count)
+
+#히스토그램으로 단어 수 분포 확인
+# 히스토그램의 범위 산정
+hist_values, hist_bins = np.histogram(word_counts, range=(0, 120), bins=6)
+hist_bins = hist_bins.astype(np.int64)
+# 그래프 초기화
+plt.rcParams["font.family"] = 'NanumGothic'
+plt.rcParams["font.size"] = 16
+plt.rcParams['axes.unicode_minus'] = False
+# 히스토그램 시각화
+fig, ax = plt.subplots(1, 1, figsize=(10, 5), dpi=150)
+sns.histplot(word_counts, bins=6, binrange=(0, 120), ax=ax)
+ax.set_xlabel('샘플내 단어 수')
+ax.set_ylabel('리뷰수')
+ax.set_xticks(hist_bins)
+ax.set_xticklabels(hist_bins)
+# 수치값 텍스트 출력
+for i, v in enumerate(hist_values):
+   x = hist_bins[i] + ((hist_bins[i+1] - hist_bins[i])/2)
+   ax.text(x=x, y=v, s=str(v), fontsize=12,
+           verticalalignment='bottom', horizontalalignment='center')
+plt.savefig('hist.png', dpi=200, bbox_inches='tight')
+plt.show()
+plt.close()
+
+
+#데이터셋 분할
+np.random.seed(777)
+
+max_word_count = max(word_counts)
+pad_token_set = pad_sequences(fill_token_set, maxlen=max_word_count)
+pad_token_set
+
+x_train, x_test, y_train, y_test = train_test_split(pad_token_set, label_set,
+                                                    test_size = 0.3, random_state = 777)
+print("훈련용 데이터셋 크기: %s, 검증용 데이터셋 크기: %s" % (x_train.shape, x_test.shape))
+print("훈련용 레이블 크기: %s, 검증용 레이블 크기: %s" % (y_train.shape, y_test.shape))
+
+y_train_one_hot = to_categorical(y_train)
+y_test_one_hot = to_categorical(y_test)
+print(y_train_one_hot[0])
+
+#모델 개발
+model = Sequential()
+# input_dim의 크기는 토큰 생성시 지정한 최대 단어수(vocab_size)와 동일하게 설정
+# output_dim의 크기는 input_dim보다 작은 값 중에서 설정
+model.add(Embedding(input_dim = vocab_size, output_dim = 32))
+model.add(GRU(128))
+# 다중분류이므로 softmax 함수와 categorical_crossentropy를 사용한다.
+model.add(Dense(len(y_train_one_hot[0]), activation='softmax'))
+model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['acc'])
+print(model.summary())
+# 학습하기
+result = model.fit(x_train, y_train_one_hot, batch_size = 10, epochs = 300,
+                  validation_data=(x_test, y_test_one_hot), callbacks = [
+ ModelCheckpoint(filepath = 'check_point.h5', monitor = 'val_loss', verbose=1,
+                  save_best_only = True),
+ EarlyStopping(monitor = 'val_loss', patience=5, verbose = 1),
+ ReduceLROnPlateau(monitor= "val_loss", patience=3, factor = 0.5,
+                  min_lr=0.0001, verbose=1)
+])
+# 학습결과 표
+result_df = DataFrame(result.history)
+result_df['epochs'] = result_df.index+1
+result_df.set_index('epochs', inplace=True)
+result_df
+
+#학습 과정 시각화
+# 그래프 기본 설정
+# ----------------------------------------
+plt.rcParams["font.family"] = 'NanumGothic'
+plt.rcParams["font.size"] = 16
+plt.rcParams['axes.unicode_minus'] = False
+# 그래프를 그리기 위한 객체 생성
+# ----------------------------------------
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 5), dpi=150)
+# 1) 훈련 및 검증 손실 그리기
+# ----------------------------------------
+sns.lineplot(x=result_df.index, y='loss', data=result_df, color='blue',
+             label='훈련 손실률', ax=ax1)
+sns.lineplot(x=result_df.index, y='val_loss', data=result_df, color='orange',
+             label='검증 손실률', ax=ax1)
+ax1.set_title('훈련 및 검증 손실률')
+ax1.set_xlabel('반복회차')
+ax1.set_ylabel('손실률')
+ax1.grid()
+ax1.legend()
+# 2) 훈련 및 검증 정확도 그리기
+# ----------------------------------------
+sns.lineplot(x=result_df.index, y='acc', data=result_df, color = 'blue',
+             label = '훈련 정확도', ax=ax2)
+sns.lineplot(x=result_df.index, y='val_acc', data=result_df, color = 'orange',
+             label = '검증 정확도', ax=ax2)
+ax2.set_title('훈련 및 검증 정확도')
+ax2.set_xlabel('반복회차')
+ax2.set_ylabel('정확도')
+ax2.grid()
+ax2.legend()
+plt.savefig('result.png', dpi=200, bbox_inches='tight')
+plt.show()
+plt.close()
+
+#훈련, 검증 정확도 평가
+train_evaluate = model.evaluate(x_train, y_train_one_hot)
+print("최종 훈련 손실률: %f, 최종 훈련 정확도: %f" % (train_evaluate[0], train_evaluate[1]))
+test_evaluate = model.evaluate(x_test, y_test_one_hot)
+print("최종 검증 손실률: %f, 최종 검증 정확도: %f" % (test_evaluate[0], test_evaluate[1]))
+
+#학습 결과 적용
+categories = ['정치','경제','사회','생활/문화','세계','IT/과학']
+# 검증 데이터를 활용한 분류 예측
+predict_result = model.predict(x_test)
+data_count, case_count = predict_result.shape
+print("%d개의 검증 데이터가 %d개의 경우의 수를 갖는다." % (data_count, case_count))
+ 
+# 경우의 수 중에서 가장 큰 값을 갖는 인덱스 위치 조회
+argmax = np.argmax(predict_result, axis=-1)
+ 
+# 결과표 구성
+kdf = DataFrame({'결과값': y_test, '예측치' : argmax})
+
+# 오차행렬
+cm = confusion_matrix(kdf['결과값'], kdf['예측치'])
+cmdf = DataFrame(cm, columns=categories, index=categories)
+cmdf
+
+#오차 행렬 히트맵
+# 히트맵
+plt.rcParams["font.family"] ='NanumGothic'
+plt.rcParams["font.size"] =16
+fig, ax = plt.subplots(1, 1, figsize=(15, 10), dpi=150)
+sns.heatmap(cmdf, annot =True, fmt ='d',cmap ='Blues', ax=ax)
+ax.set_xlabel('예측값')
+ax.set_ylabel('결과값')
+plt.savefig('heatmap.png', dpi=200, bbox_inches='tight')
+plt.show()
+plt.close()
+
+#임의의 문장 5개에 대한 분류
+# 임의의 문장
+test_news = [
+ "가을을 부르는 의상 스타일",
+ "미국,영국,프랑스... 락다운 다시 시작",
+ "아파트 가격 1년째 급격이 올랐다.",
+ "이르면 4분기 고위험군·의료진 등 부스터샷 검토… 백신 종류 '미정'",
+ "비, 오후 전국 확대…남부, 시간당 50㎜ 피해 우려",
+ "OOO법 발의... 오는 1일 국회 본회의에서 결정"
+]
+
+import re
+# 한글이 아닌 데이터 제거
+for i, v in enumerate(test_news):
+   test_news[i] = re.sub("[^ㄱ-ㅎㅏ-ㅣ가-힣 ]", "", v)
+print(test_news)
+# 형태소 분석 엔진
+mecab = Mecab()
+# 불용어를 제거한 형태소들이 저장될 리스트
+word_set = []
+# 문장 수 만큼 반복
+for c in test_news: 
+   # 형태소 분석
+   morphs = mecab.morphs(c)
+   # 불용어 제거
+   tmp_word = []
+   for j in morphs:
+     if j not in stopwords:
+       tmp_word.append(j)
+ 
+ word_set.append(tmp_word)
+# 자주 등장하는 단어를 제외한 나머지 단어를 OOV로 처리하여 최종 토큰화 수행
+tokenizer = Tokenizer(vocab_size, oov_token = 'OOV')
+tokenizer.fit_on_texts(word_set)
+token_set = tokenizer.texts_to_sequences(word_set)
+# 최대 길이에 맞춰서 패딩 처리
+pad_token_set = pad_sequences(token_set, maxlen=max_word_count)
+# 전처리가 완료된 말뭉치를 학습모델에 적용하여 예측하기
+result = model.predict(pad_token_set)
+# 가장 큰 값을 갖는 인덱스들의 모음
+argmax = np.argmax(result, axis=-1)
+# 결과 분석
+for i, v in enumerate(argmax):
+ print("%s >> %s" % (categories[v], test_news[i]))
